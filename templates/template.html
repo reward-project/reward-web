@@ -95,6 +95,104 @@
             font-weight: bold;
             color: #28a745;
         }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.4);
+        }
+
+        .modal-content {
+            background-color: #fefefe;
+            margin: 15% auto;
+            padding: 20px;
+            border: 1px solid #888;
+            width: 80%;
+            max-width: 800px;
+        }
+
+        .rank-history-controls {
+            margin-bottom: 20px;
+        }
+
+        .rank-history-controls button {
+            margin-right: 10px;
+        }
+
+        #rankHistoryContent table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        #rankHistoryContent th, #rankHistoryContent td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .button-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .back-button {
+            padding: 8px 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .back-button:hover {
+            background-color: #45a049;
+        }
+
+        .close {
+            color: #aaa;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .close:hover {
+            color: #000;
+        }
+
+        #searchLog {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            height: 300px;
+            overflow-y: auto;
+        }
+        
+        #logContent {
+            font-family: monospace;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        
+        #logContent:empty:before {
+            content: "로그가 없습니다.";
+            color: #999;
+            font-style: italic;
+        }
     </style>
 </head>
 <body>
@@ -147,8 +245,9 @@
                 <td>{{ item.date }}</td>
                 <td>{{ item.time }}</td>
                 <td>
-                    <button onclick="deleteRow({{ loop.index0 }})">삭제</button>
                     <button onclick="searchNow({{ loop.index0 }})">지금 검색</button>
+                    <button onclick="stopSingleSearch({{ loop.index0 }})">중단</button>
+                    <button onclick="viewRankHistory('{{ item.product_id }}')">조회</button>
                 </td>
             </tr>
             {% endfor %}
@@ -161,6 +260,27 @@
         
         <h3>저장된 로그 파일</h3>
         <div id="logFiles"></div>
+    </div>
+
+    <!-- 순위 조회 모달 -->
+    <div id="rankHistoryModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>순위 이력 조회</h2>
+                <div class="button-group">
+                    <button onclick="closeRankHistory()" class="back-button">돌아가기</button>
+                    <span class="close" onclick="closeRankHistory()">&times;</span>
+                </div>
+            </div>
+            <div class="rank-history-controls">
+                <button onclick="viewHourlyRank()">시간별</button>
+                <button onclick="viewDailyRank()">일별</button>
+                <input type="date" id="rankDate" onchange="viewRankByDate(this.value)">
+            </div>
+            <div id="rankHistoryContent">
+                <!-- 순위 이력이 여기에 표시됨 -->
+            </div>
+        </div>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
@@ -184,7 +304,7 @@
             console.log('Connected to server');
             isConnected = true;
             updateConnectionStatus('connected');
-            // 재연결 시 마지막 상태 복원
+            // 재연�� 시 마지막 상태 복원
             updateStatus(lastStatus, { message: lastMessage });
         });
         
@@ -260,29 +380,45 @@
             if (!isConnected) return;  // 연결이 끊어진 상태면 무시
             
             const logContent = document.getElementById('logContent');
-            logContent.innerHTML += data.message + '\n';
-            logContent.scrollTop = logContent.scrollHeight;
+            if (logContent) {
+                // 새 로그 추가
+                logContent.innerHTML += data.message + '\n';
+                // 스크롤을 항상 최하단으로
+                logContent.scrollTop = logContent.scrollHeight;
+                
+                // 로그가 1000줄을 넘으면 오래된 로그 삭제
+                const lines = logContent.innerHTML.split('\n');
+                if (lines.length > 1000) {
+                    logContent.innerHTML = lines.slice(-1000).join('\n');
+                }
+            }
         });
 
         // 검색 상태 업데이트
         socket.on('search_status', function(data) {
-            if (!isConnected) return;  // 연결이 끊어진 상태면 무시
+            if (!isConnected) return;
             
             updateStatus(data.status, data);
-            if (data.status === 'searching' && data.current && data.total) {
+            
+            // 검색 중일 때 상태 표시 업데이트
+            if (data.status === 'searching') {
                 const progressInfo = document.getElementById('progressInfo');
                 const currentProgress = document.getElementById('currentProgress');
                 const totalItems = document.getElementById('totalItems');
                 const currentKeyword = document.getElementById('currentKeyword');
+                const statusText = document.getElementById('statusText');
                 
                 progressInfo.style.display = 'block';
-                currentProgress.textContent = data.current;
-                totalItems.textContent = data.total;
-                currentKeyword.textContent = data.keyword || '없음';
+                statusText.textContent = '검색 진행 중';
                 
-                // 진행률 표시 추가
-                const progressPercent = Math.round((data.current / data.total) * 100);
-                progressInfo.title = `진행률: ${progressPercent}%`;
+                if (data.current && data.total) {
+                    currentProgress.textContent = data.current;
+                    totalItems.textContent = data.total;
+                    currentKeyword.textContent = data.keyword || '없음';
+                    
+                    const progressPercent = Math.round((data.current / data.total) * 100);
+                    progressInfo.title = `진행률: ${progressPercent}%`;
+                }
             }
         });
 
@@ -318,7 +454,7 @@
         }
 
         function deleteRow(index) {
-            if (confirm('정말 삭제하시��습니까?')) {
+            if (confirm('정말 삭제하시겠습니까?')) {
                 fetch('/delete_row', {
                     method: 'POST',
                     headers: {
@@ -425,7 +561,7 @@
         }
 
         function stopSearch() {
-            if (confirm('검색을 중지하시겠습��까?')) {
+            if (confirm('검색을 중지하시겠습니까?')) {
                 fetch('/stop_search', {
                     method: 'POST',
                     headers: {
@@ -470,6 +606,133 @@
         
         // 1분마다 로그 파일 목록 갱신
         setInterval(loadLogFiles, 60000);
+
+        // 전역 변수 추가
+        let currentProductId = null;
+
+        function viewRankHistory(productId) {
+            // 현재 상품 ID 저장
+            currentProductId = productId;
+            
+            // 모달 열기
+            const modal = document.getElementById('rankHistoryModal');
+            modal.style.display = "block";
+            
+            // 오늘 날짜로 초기화
+            const today = new Date().toISOString().split('T')[0];
+            document.getElementById('rankDate').value = today;
+            
+            // 시간별 순위 조회
+            viewHourlyRank();
+        }
+
+        function viewHourlyRank() {
+            if (!currentProductId) return;
+            
+            const date = document.getElementById('rankDate').value;
+            
+            fetch('/view_rank_history', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    product_id: currentProductId,
+                    date: date
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    displayRankHistory(data, 'hourly');
+                } else {
+                    alert(data.message);
+                }
+            })
+            .catch(error => {
+                console.error('순위 조회 오류:', error);
+                alert('순위 조회 중 오류가 발생했습니다.');
+            });
+        }
+
+        function viewDailyRank() {
+            if (!currentProductId) return;
+            
+            fetch('/view_rank_history', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    product_id: currentProductId
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    displayRankHistory(data, 'daily');
+                } else {
+                    alert(data.message);
+                }
+            })
+            .catch(error => {
+                console.error('순위 조회 오류:', error);
+                alert('순위 조회 중 오류가 발생했습니다.');
+            });
+        }
+
+        function viewRankByDate(date) {
+            if (!currentProductId) return;
+            viewHourlyRank();
+        }
+
+        function displayRankHistory(data, type) {
+            const content = document.getElementById('rankHistoryContent');
+            let html = `
+                <h3>상품 정보</h3>
+                <p>키워드: ${data.product_info.keyword}</p>
+                <p>상품 ID: ${data.product_info.product_id}</p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>날짜</th>
+                            <th>시간</th>
+                            <th>순위</th>
+                            <th>페이지</th>
+                            <th>전체 순위</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            
+            data.rank_history.forEach(item => {
+                html += `
+                    <tr>
+                        <td>${item.date}</td>
+                        <td>${item.time}</td>
+                        <td>${item.rank}</td>
+                        <td>${item.page}</td>
+                        <td>${item.page_rank}</td>
+                    </tr>
+                `;
+            });
+            
+            html += '</tbody></table>';
+            content.innerHTML = html;
+        }
+
+        function closeRankHistory() {
+            const modal = document.getElementById('rankHistoryModal');
+            modal.style.display = "none";
+            currentProductId = null;  // 현재 상품 ID 초기화
+        }
+
+        // ESC 키로도 모달 닫기
+        window.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closeRankHistory();
+            }
+        });
     </script>
 </body>
 </html> 

@@ -168,11 +168,23 @@ def perform_search():
     try:
         if not search_active:
             emit_log("검색이 이미 중지되었습니다.")
-            socketio.emit('search_status', {'status': 'waiting'})
+            socketio.emit('search_status', {
+                'status': 'waiting',
+                'current': 0,
+                'total': 0,
+                'keyword': '',
+                'message': '검색 대기 중...'
+            })
             return
         
-        emit_log("\n=== 검색 프로세스 초기화 중... ===")
-        socketio.emit('search_status', {'status': 'searching'})  # 검색 상태 유지
+        # 검색 시작 상태로 즉시 업데이트
+        socketio.emit('search_status', {
+            'status': 'searching',
+            'current': 0,
+            'total': 0,
+            'keyword': '',
+            'message': '검색 초기화 중...'
+        })
         
         # 1. 엑셀 파일 로드 및 데이터 검증
         rank_df = load_excel()
@@ -204,12 +216,25 @@ def perform_search():
         
         # 3. 검색 시작
         emit_log(f"\n=== 검색 시작 (총 {total_items}개 항목) ===")
+        socketio.emit('search_status', {
+            'status': 'searching',
+            'current': 0,
+            'total': total_items,
+            'keyword': '',
+            'message': f'검색 시작 중... (총 {total_items}개 항목)'
+        })
         
         # 4. 각 키워드별 검색 실행
         for index, row in valid_df.iterrows():
             if not search_active:
                 emit_log("\n=== 검색이 중지되었습니다 ===")
-                socketio.emit('search_status', {'status': 'waiting'})
+                socketio.emit('search_status', {
+                    'status': 'waiting',
+                    'current': 0,
+                    'total': total_items,
+                    'keyword': '',
+                    'message': '검색이 중지되었습니다'
+                })
                 break
             
             try:
@@ -231,11 +256,19 @@ def perform_search():
                 # 실제 검색 수행
                 result = search_product(keyword, product_id)
                 
-                # 검색 결과 처리
+                # 검색 결과 처리 및 상태 업데이트
                 if result:
-                    emit_log(f"상품 발견: 페이지 {result['page']}, " + 
-                            (f"광고 순위 {result['rank']}" if result['rank_type'] == 'ad' else f"일반 순위 {result['rank']}") +
-                            f", 전체 순위 {result['page_rank']}")
+                    status_msg = f"상품 발견: 페이지 {result['page']}, " + \
+                               (f"광고 순위 {result['rank']}" if result['rank_type'] == 'ad' else f"일반 순위 {result['rank']}") + \
+                               f", 전체 순위 {result['page_rank']}"
+                    emit_log(status_msg)
+                    socketio.emit('search_status', {
+                        'status': 'searching',
+                        'current': current_number,
+                        'total': total_items,
+                        'keyword': keyword,
+                        'message': status_msg
+                    })
                     
                     rank_df.loc[index, 'page'] = result['page']
                     rank_df.loc[index, 'rank'] = result['rank'] if result['rank_type'] != 'ad' else 0
@@ -256,25 +289,38 @@ def perform_search():
                 rank_df.to_excel('coupang_rank.xlsx', index=False)
                 socketio.emit('refresh_page', {})
                 
-                # 다음 검색 전 대기
-                time.sleep(3)
-                
             except Exception as e:
                 emit_log(f"검색 중 오류 발생: {str(e)}")
-                # 오류가 발생해도 검색 상태 유지
-                socketio.emit('search_status', {'status': 'searching'})
+                socketio.emit('search_status', {
+                    'status': 'error',
+                    'current': current_number,
+                    'total': total_items,
+                    'keyword': keyword,
+                    'message': f'오류 발생: {str(e)}'
+                })
                 continue
         
         # 5. 검색 완료
         search_active = False
-        if search_active:
-            emit_log("\n=== 모든 검색이 완료되었습니다 ===")
-            socketio.emit('search_status', {'status': 'completed'})
+        emit_log("\n=== 모든 검색이 완료되었습니다 ===")
+        socketio.emit('search_status', {
+            'status': 'completed',
+            'current': total_items,
+            'total': total_items,
+            'keyword': '',
+            'message': '검색이 완료되었습니다'
+        })
         
     except Exception as e:
-        emit_log(f"검색 프로세스 오류: {str(e)}")
+        emit_log(f"검색 프로���스 오류: {str(e)}")
         search_active = False
-        socketio.emit('search_status', {'status': 'error'})
+        socketio.emit('search_status', {
+            'status': 'error',
+            'current': 0,
+            'total': 0,
+            'keyword': '',
+            'message': f'검색 프로세스 오류: {str(e)}'
+        })
 
 @app.route("/")
 def index():
@@ -304,14 +350,21 @@ def handle_connect():
 
 @app.route("/update", methods=['POST'])
 def update_excel():
-    """웹페이지에서 데이터 정"""
+    """웹페이지에서 데이터 수정"""
     try:
         data = request.json
         df = load_excel()
         if df is not None:
             row_index = int(data['index'])
             column = data['column']
-            value = data['value']
+            value = data['value'] if data['value'] != '' else ''  # 빈 문자열 처리
+            
+            # NaN 방지를 위한 처리
+            if column in ['page', 'rank', 'page_rank']:
+                value = 0 if value == '' else int(value)
+            elif column == 'ad':
+                value = '0' if value == '' else value
+                
             df.at[row_index, column] = value
             df.to_excel('coupang_rank.xlsx', index=False)
             return jsonify({"status": "success"})
@@ -356,7 +409,7 @@ def smooth_scroll(browser):
             total_height = new_height
 
 def analyze_page(soup, page, product_id):
-    """페이지 ��을 분석하여 상품 찾기"""
+    """페이지 을 분석하여 상품 찾기"""
     products = soup.select('.search-product')
     non_ad_rank = 0
     ad_rank = 0
@@ -372,7 +425,7 @@ def analyze_page(soup, page, product_id):
         else:
             non_ad_rank += 1
         
-        # 상품 정보 추출
+        # 상품 보 추출
         product_link = product.select_one('a.search-product-link')
         if not product_link:
             continue
@@ -385,7 +438,7 @@ def analyze_page(soup, page, product_id):
         current_url = product_link.get('href', '')
         current_id = current_url.split('/')[-1].split('?')[0]
         
-        # 목록 상품 확인
+        # 목록 상 확인
         if product_id == current_id:
             print("\n[상품 발견!]")
             print(f"페이지: {page}")
@@ -423,7 +476,7 @@ def analyze_page(soup, page, product_id):
     return None
 
 def search_product(keyword, product_id):
-    """쿠팡에서 상품을 검색하고 순위를 찾는 함수"""
+    """쿠팡에서 품을 검색하고 순위를 찾는 함수"""
     browser = None
     try:
         emit_log(f"검색 시작: 키워드 '{keyword}', 상품 ID '{product_id}'")
@@ -536,12 +589,12 @@ def add_row():
                 'number': len(df) + 1,
                 'keyword': '',
                 'product_id': '',
-                'page': None,
-                'rank': None,
-                'ad': None,
-                'page_rank': None,
-                'date': None,
-                'time': None
+                'page': 0,
+                'rank': 0,
+                'ad': '0',
+                'page_rank': 0,
+                'date': '',
+                'time': ''
             }
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             df.to_excel('coupang_rank.xlsx', index=False)
@@ -642,7 +695,7 @@ def start_search():
             'message': f'검색 초기화 중... (총 {len(valid_df)}개 항목)'
         })
         
-        # 백그라운드에서 검색 ���행
+        # 백그라운드에서 검색 행
         eventlet.spawn(perform_search)
         return jsonify({"status": "success", "message": f"검색을 시작합니다. (총 {len(valid_df)}개 항목)"})
         
@@ -678,9 +731,10 @@ def stop_search():
 def get_logs():
     """저장된 로그 파일 목록 반환"""
     try:
+        today = datetime.now().strftime('%Y%m%d')
         log_files = []
         for file in os.listdir(LOG_DIR):
-            if file.startswith('search_log_') and file.endswith('.txt'):
+            if file.startswith(f'search_log_{today}') and file.endswith('.txt'):
                 log_files.append(file)
         return jsonify({"status": "success", "files": sorted(log_files, reverse=True)})
     except Exception as e:
@@ -700,6 +754,91 @@ def view_log(filename):
         return "로그 파일을 찾을 수 없습니다."
     except Exception as e:
         return str(e)
+
+@app.route("/stop_single_search", methods=['POST'])
+def stop_single_search():
+    """단일 검색 중지"""
+    try:
+        data = request.json
+        index = data['index']
+        job_id = f"immediate_search_{index}"
+        
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+            emit_log(f"검색 항목 {index} 중단됨")
+            return jsonify({"status": "success"})
+        return jsonify({"status": "error", "message": "진행 중인 검색이 없습니다."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+# 순위 조회 관련 함수 추가
+def get_rank_history(product_id, date=None):
+    """특정 상품의 시간별/일별 순위 이력 조회"""
+    try:
+        df = load_excel()
+        if df is None:
+            return None
+            
+        # 해당 상품의 데이터만 필터링
+        product_df = df[df['product_id'] == product_id].copy()
+        
+        if date:
+            # 특정 날짜의 데이터만 필터링
+            product_df = product_df[product_df['date'] == date]
+            
+        # 날짜와 시간으로 정렬
+        product_df = product_df.sort_values(['date', 'time'], ascending=[False, False])
+        
+        # 결과 데이터 구성
+        result = []
+        for _, row in product_df.iterrows():
+            result.append({
+                'date': row['date'],
+                'time': row['time'],
+                'keyword': row['keyword'],
+                'rank': row['rank'] if row['ad'] != 'O' else f"광고 {row['page_rank']}위",
+                'page': row['page'],
+                'page_rank': row['page_rank']
+            })
+            
+        return result
+        
+    except Exception as e:
+        emit_log(f"순위 이력 조회 중 오류: {str(e)}")
+        return None
+
+@app.route("/view_rank_history", methods=['POST'])
+def view_rank_history():
+    """순위 이력 조회 페이지"""
+    try:
+        data = request.json
+        product_id = data.get('product_id')
+        date = data.get('date')  # 특정 날짜 조회 시
+        
+        df = load_excel()
+        if df is None:
+            return jsonify({"status": "error", "message": "데이터를 읽을 수 없습니다."})
+            
+        # 해당 상품 정보 가져오기
+        product_info = df[df['product_id'] == product_id].iloc[0]
+        
+        # 순위 이력 조회
+        rank_history = get_rank_history(product_id, date)
+        
+        if rank_history:
+            return jsonify({
+                "status": "success",
+                "product_info": {
+                    "keyword": product_info['keyword'],
+                    "product_id": product_id
+                },
+                "rank_history": rank_history
+            })
+        else:
+            return jsonify({"status": "error", "message": "순위 이력이 없습니다."})
+            
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
 
 if __name__ == "__main__":
     try:
