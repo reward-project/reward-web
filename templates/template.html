@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+        }
+        .header {
+            text-align: center;
+            padding: 20px;
+            background-color: #f0f0f0;
+            margin-bottom: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        .editable:hover {
+            background-color: #f5f5f5;
+            cursor: pointer;
+        }
+        #searchLog {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            height: 300px;
+            overflow-y: auto;
+        }
+        .add-row-btn {
+            margin: 20px 0;
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        .status-active {
+            background-color: #4CAF50;
+            animation: blink 1s infinite;
+        }
+        .status-inactive {
+            background-color: #gray;
+        }
+        @keyframes blink {
+            50% { opacity: 0.5; }
+        }
+        #searchStatus {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #e8f5e9;
+            border-radius: 5px;
+        }
+        .action-btn {
+            margin-left: 20px;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        #startSearchBtn {
+            background-color: #4CAF50;
+            color: white;
+        }
+        #stopSearchBtn {
+            background-color: #f44336;
+            color: white;
+        }
+        #progressInfo {
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        #currentKeyword {
+            font-weight: bold;
+            color: #28a745;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>{{ title }}</h1>
+        <p>{{ message }}</p>
+    </div>
+
+    <div id="searchStatus">
+        <span class="status-indicator" id="statusDot"></span>
+        <div style="display: inline-block; vertical-align: middle;">
+            <div id="statusText">검색 대기 중...</div>
+            <div id="searchDetail" style="font-size: 0.9em; color: #666;"></div>
+        </div>
+        <button id="startSearchBtn" class="action-btn" onclick="startSearch()">검색 시작</button>
+        <button id="stopSearchBtn" class="action-btn" onclick="stopSearch()" style="display: none;">검색 중지</button>
+        <div id="progressInfo" style="display: none; margin-top: 10px;">
+            <div>진행 상황: <span id="currentProgress">0</span>/<span id="totalItems">0</span></div>
+            <div>현재 검색어: "<span id="currentKeyword"></span>"</div>
+        </div>
+    </div>
+
+    <button class="add-row-btn" onclick="addNewRow()">새 검색어 추가</button>
+    
+    <table id="rankTable">
+        <thead>
+            <tr>
+                <th>Number</th>
+                <th>Keyword</th>
+                <th>Product ID</th>
+                <th>Page</th>
+                <th>Rank</th>
+                <th>Ad</th>
+                <th>Page Rank</th>
+                <th>Date</th>
+                <th>Time</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in data %}
+            <tr>
+                <td>{{ item.number }}</td>
+                <td class="editable" data-index="{{ loop.index0 }}" data-column="keyword">{{ item.keyword }}</td>
+                <td class="editable" data-index="{{ loop.index0 }}" data-column="product_id">{{ item.product_id }}</td>
+                <td>{{ item.page }}</td>
+                <td>{{ item.rank }}</td>
+                <td>{{ item.ad }}</td>
+                <td>{{ item.page_rank }}</td>
+                <td>{{ item.date }}</td>
+                <td>{{ item.time }}</td>
+                <td>
+                    <button onclick="deleteRow({{ loop.index0 }})">삭제</button>
+                    <button onclick="searchNow({{ loop.index0 }})">지금 검색</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div id="searchLog">
+        <h3>실시간 검색 로그</h3>
+        <pre id="logContent"></pre>
+        
+        <h3>저장된 로그 파일</h3>
+        <div id="logFiles"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script>
+        // Socket.IO 연결 설정 수정
+        const socket = io({
+            transports: ['websocket', 'polling'],
+            upgrade: true,
+            reconnection: true,
+            reconnectionAttempts: Infinity,  // 무한 재시도
+            reconnectionDelay: 1000,
+            timeout: 20000
+        });
+        
+        // 연결 상태 관리
+        let isConnected = false;
+        let lastStatus = 'waiting';
+        let lastMessage = '';
+
+        socket.on('connect', function() {
+            console.log('Connected to server');
+            isConnected = true;
+            updateConnectionStatus('connected');
+            // 재연결 시 마지막 상태 복원
+            updateStatus(lastStatus, { message: lastMessage });
+        });
+        
+        socket.on('disconnect', function() {
+            console.log('Disconnected from server');
+            isConnected = false;
+            updateConnectionStatus('disconnected');
+            // 연결이 끊어져도 마지막 상태 유지
+            updateStatus(lastStatus, { message: lastMessage });
+        });
+
+        function updateConnectionStatus(status) {
+            const connectionStatus = document.getElementById('connectionStatus');
+            if (!connectionStatus) {
+                const statusDiv = document.createElement('div');
+                statusDiv.id = 'connectionStatus';
+                statusDiv.style.cssText = 'font-size: 0.8em; color: #666; margin-top: 5px;';
+                document.getElementById('searchStatus').appendChild(statusDiv);
+            }
+            
+            if (status === 'connected') {
+                connectionStatus.style.color = '#4CAF50';
+                connectionStatus.textContent = '서버 연결됨';
+            } else {
+                connectionStatus.style.color = '#f44336';
+                connectionStatus.textContent = '서버 연결 끊김 (자동 재연결 시도 중...)';
+            }
+        }
+
+        function updateStatus(status, data) {
+            // 현재 상태 저장
+            lastStatus = status;
+            if (data && data.message) {
+                lastMessage = data.message;
+            }
+
+            const statusDot = document.getElementById('statusDot');
+            const statusText = document.getElementById('statusText');
+            const searchDetail = document.getElementById('searchDetail');
+            const startBtn = document.getElementById('startSearchBtn');
+            const stopBtn = document.getElementById('stopSearchBtn');
+            
+            if (status === 'searching') {
+                statusDot.className = 'status-indicator status-active';
+                startBtn.style.display = 'none';
+                stopBtn.style.display = 'inline-block';
+                if (data && data.message) {
+                    statusText.textContent = '검색 진행 중';
+                    searchDetail.textContent = data.message;
+                } else {
+                    statusText.textContent = '검색 진행 중...';
+                    searchDetail.textContent = lastMessage;
+                }
+            } else if (status === 'stopped') {
+                statusDot.className = 'status-indicator status-inactive';
+                startBtn.style.display = 'inline-block';
+                stopBtn.style.display = 'none';
+                statusText.textContent = '검색이 중지됨';
+                searchDetail.textContent = '';
+                document.getElementById('progressInfo').style.display = 'none';
+            } else {
+                statusDot.className = 'status-indicator status-inactive';
+                startBtn.style.display = 'inline-block';
+                stopBtn.style.display = 'none';
+                statusText.textContent = '검색 대기 중...';
+                searchDetail.textContent = '';
+                document.getElementById('progressInfo').style.display = 'none';
+            }
+        }
+
+        // 로그 메시지 처리
+        socket.on('log_message', function(data) {
+            if (!isConnected) return;  // 연결이 끊어진 상태면 무시
+            
+            const logContent = document.getElementById('logContent');
+            logContent.innerHTML += data.message + '\n';
+            logContent.scrollTop = logContent.scrollHeight;
+        });
+
+        // 검색 상태 업데이트
+        socket.on('search_status', function(data) {
+            if (!isConnected) return;  // 연결이 끊어진 상태면 무시
+            
+            updateStatus(data.status, data);
+            if (data.status === 'searching' && data.current && data.total) {
+                const progressInfo = document.getElementById('progressInfo');
+                const currentProgress = document.getElementById('currentProgress');
+                const totalItems = document.getElementById('totalItems');
+                const currentKeyword = document.getElementById('currentKeyword');
+                
+                progressInfo.style.display = 'block';
+                currentProgress.textContent = data.current;
+                totalItems.textContent = data.total;
+                currentKeyword.textContent = data.keyword || '없음';
+                
+                // 진행률 표시 추가
+                const progressPercent = Math.round((data.current / data.total) * 100);
+                progressInfo.title = `진행률: ${progressPercent}%`;
+            }
+        });
+
+        // 페이지 새로고침 방지
+        socket.on('refresh_page', function() {
+            if (!isConnected) return;  // 연결이 끊어진 상태면 무시
+            
+            // 새로고침 대신 데이터만 업데이트
+            fetch(window.location.href)
+                .then(response => response.text())
+                .then(html => {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(html, 'text/html');
+                    const newTable = doc.getElementById('rankTable');
+                    document.getElementById('rankTable').innerHTML = newTable.innerHTML;
+                })
+                .catch(error => console.error('데이터 업데이트 실패:', error));
+        });
+
+        function addNewRow() {
+            fetch('/add_row', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    location.reload();
+                }
+            });
+        }
+
+        function deleteRow(index) {
+            if (confirm('정말 삭제하시��습니까?')) {
+                fetch('/delete_row', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ index: index })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        location.reload();
+                    }
+                });
+            }
+        }
+
+        function searchNow(index) {
+            updateStatus('searching');  // 검색 시작 상태로 변경
+            fetch('/search_now', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ index: index })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert('검색이 시작되었습니다.');
+                } else {
+                    updateStatus('waiting');
+                    alert('검색 시작 실패');
+                }
+            });
+        }
+
+        // 편집 가능한 셀 리스너
+        document.querySelectorAll('.editable').forEach(cell => {
+            cell.addEventListener('click', function() {
+                const value = this.textContent;
+                const input = document.createElement('input');
+                input.value = value;
+                this.textContent = '';
+                this.appendChild(input);
+                input.focus();
+
+                input.addEventListener('blur', function() {
+                    const newValue = this.value;
+                    const index = cell.dataset.index;
+                    const column = cell.dataset.column;
+                    
+                    fetch('/update', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            index: index,
+                            column: column,
+                            value: newValue
+                        })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            cell.textContent = newValue;
+                        } else {
+                            cell.textContent = value;
+                            alert('업데이트 실패');
+                        }
+                    });
+                });
+            });
+        });
+
+        // 1분마다 페이지 새로고침
+        setInterval(() => {
+            location.reload();
+        }, 60000);
+
+        function startSearch() {
+            fetch('/start_search', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    // 시작 버튼 숨기고 정지 버튼 표시
+                    document.getElementById('startSearchBtn').style.display = 'none';
+                    document.getElementById('stopSearchBtn').style.display = 'inline-block';
+                    document.getElementById('progressInfo').style.display = 'block';
+                    updateStatus('searching');
+                } else {
+                    alert(data.message || '검색 시작 실패');
+                }
+            })
+            .catch(error => {
+                console.error('검색 시작 오류:', error);
+                alert('검색 시작 중 오류가 발생했습니다.');
+            });
+        }
+
+        function stopSearch() {
+            if (confirm('검색을 중지하시겠습��까?')) {
+                fetch('/stop_search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        // 정지 버튼 숨기고 시작 버튼 표시
+                        document.getElementById('startSearchBtn').style.display = 'inline-block';
+                        document.getElementById('stopSearchBtn').style.display = 'none';
+                        document.getElementById('progressInfo').style.display = 'none';
+                        updateStatus('stopped');
+                    } else {
+                        alert('검색 중지 실패');
+                    }
+                })
+                .catch(error => {
+                    console.error('검색 중지 오류:', error);
+                    alert('검색 중지 중 오류가 발생했습니다.');
+                });
+            }
+        }
+
+        // 로그 파일 목록 로드
+        function loadLogFiles() {
+            fetch('/get_logs')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        const logFilesDiv = document.getElementById('logFiles');
+                        logFilesDiv.innerHTML = data.files.map(file => 
+                            `<div><a href="/view_log/${file}" target="_blank">${file}</a></div>`
+                        ).join('');
+                    }
+                });
+        }
+
+        // 페이지 로드 시 로그 파일 목록 표시
+        loadLogFiles();
+        
+        // 1분마다 로그 파일 목록 갱신
+        setInterval(loadLogFiles, 60000);
+    </script>
+</body>
+</html> 
